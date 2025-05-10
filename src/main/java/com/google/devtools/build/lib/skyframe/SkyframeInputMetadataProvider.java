@@ -25,8 +25,10 @@ import com.google.devtools.build.lib.actions.InputMetadataProvider;
 import com.google.devtools.build.lib.actions.MissingDepExecException;
 import com.google.devtools.build.lib.actions.RunfilesArtifactValue;
 import com.google.devtools.build.lib.actions.RunfilesTree;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.MemoizingEvaluator;
+import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.io.IOException;
 import java.util.Map;
@@ -35,7 +37,7 @@ import javax.annotation.Nullable;
 
 /**
  * An {@link InputMetadataProvider} implementation that requests the metadata of derived artifacts
- * from Skyframe.
+ * from Skyframe and that of source artifacts from the per-build metadata cache.
  *
  * <p>During input discovery, the action may well legally read scheduling dependencies that are not
  * also inputs. Those are not in the regular input metadata provider (doing so would be a
@@ -46,16 +48,45 @@ import javax.annotation.Nullable;
  * <p>In theory, this would also work for source artifacts. However, the performance ramifications
  * of doing that are unknown.
  */
-public class SkyframeInputMetadataProvider implements InputMetadataProvider {
+final class SkyframeInputMetadataProvider implements InputMetadataProvider {
   private final MemoizingEvaluator evaluator;
-  private final InputMetadataProvider perBuild;
-  private final ConcurrentHashMap<String, ActionInput> seen;
 
-  public SkyframeInputMetadataProvider(
-      MemoizingEvaluator evaluator, InputMetadataProvider perBuild) {
+  // Non-null while skyframe lookups are being allowed during input discovery.
+  @Nullable private SkyFunction.Environment env;
+
+  private final Object envMonitor;
+  private final InputMetadataProvider perBuild;
+  private final PathFragment relativeOutputPath;
+
+  private final ConcurrentHashMap<String, ActionInput> seen;
+  private boolean allowSkyframe;
+
+  SkyframeInputMetadataProvider(
+      MemoizingEvaluator evaluator, InputMetadataProvider perBuild, String relativeOutputPath) {
     this.evaluator = evaluator;
+    this.envMonitor = new Object();
     this.perBuild = perBuild;
+    this.relativeOutputPath = PathFragment.create(relativeOutputPath);
     this.seen = new ConcurrentHashMap<>();
+    this.allowSkyframe = false;
+  }
+
+  /**
+   * Allow Skyframe access while the returned closeable is open.
+   *
+   * <p>This should only happen during input discovery, so we disallow it everywhere else.
+   */
+  // TODO: b/416449869 - Add test coverage for a new env being set after a skyframe restart.
+  SilentCloseable withSkyframeAllowed(SkyFunction.Environment env) {
+    // No need to synchronize with envMonitor here. This is called before input discovery begins,
+    // and the closeable is called after input discovery ends, so there are no concurrent calls to
+    // getInputMetadataChecked.
+    allowSkyframe = true;
+    this.env = env;
+    return () -> {
+      allowSkyframe = false;
+      this.env = null;
+    };
   }
 
   @Nullable
@@ -63,27 +94,51 @@ public class SkyframeInputMetadataProvider implements InputMetadataProvider {
   public FileArtifactValue getInputMetadataChecked(ActionInput input)
       throws InterruptedException, IOException, MissingDepExecException {
     if (!(input instanceof Artifact artifact)) {
-      return perBuild.getInputMetadataChecked(input);
+      if (!input.getExecPath().startsWith(relativeOutputPath)) {
+        return perBuild.getInputMetadataChecked(input);
+      } else {
+        return null;
+      }
     }
 
     if (artifact.isSourceArtifact()) {
       return perBuild.getInputMetadataChecked(input);
     }
 
+    if (!allowSkyframe) {
+      return null;
+    }
+
     if (artifact instanceof SpecialArtifact) {
       return null;
     }
 
+    // We use .getExistingValue() to spare a Skyframe edge. This is correct because these are always
+    // transitive dependencies (it's not a property that's inherently true, though, it's just how
+    // actions that discover inputs happen to be implemented)
     SkyValue value = evaluator.getExistingValue(Artifact.key(artifact));
     if (value == null) {
-      // This can only happen if a transitive dependency was rewound but the re-evaluation resulted
-      // in an error or the rewinding is in progress. In either case, the InputMetadataProvider is
-      // an ActionFileSystem because that's always the case when rewinding is enabled so this code
-      // path should never be taken.
-      throw new IllegalStateException(
-          String.format(
-              "Transitive dependency derived artifact '%s' is not in Skyframe",
-              artifact.getExecPathString()));
+      synchronized (envMonitor) {
+        // This can only happen if a transitive dependency was rewound but the re-evaluation
+        // resulted in an error or the rewinding is in progress.
+        //
+        // env is set to null once any missing values are detected. This is a work-around for a
+        // semi-bug in include scanning where the include scanner might continue processing after
+        // the action has already ended. This is problematic because lookups against an environment
+        // crash once the associated action is done. Instead, any subsequent lookups throw
+        // MissingDepExecException without adding a dependency edge. At worst, this can only result
+        // in a superfluous restart.
+        if (env == null) {
+          throw new MissingDepExecException();
+        }
+        value = env.getValue(Artifact.key(artifact));
+        if (value == null) {
+          env = null;
+          throw new MissingDepExecException();
+        }
+        // This can happen if the evaluation of "value" finished between the getExistingValue()
+        // call and the getValue() one. In this case, "value" is good. We move on.
+      }
     }
 
     seen.put(artifact.getExecPathString(), artifact);
@@ -99,7 +154,7 @@ public class SkyframeInputMetadataProvider implements InputMetadataProvider {
 
   @Nullable
   @Override
-  public TreeArtifactValue getTreeMetadataForPrefix(PathFragment execPath) {
+  public TreeArtifactValue getEnclosingTreeMetadata(PathFragment execPath) {
     return null;
   }
 

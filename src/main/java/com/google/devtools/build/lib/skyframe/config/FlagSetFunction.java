@@ -13,10 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe.config;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.devtools.common.options.OptionsParser.STARLARK_SKIPPED_PREFIXES;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Splitter;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -28,6 +31,7 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.runtime.ConfigFlagDefinitions;
 import com.google.devtools.build.lib.skyframe.ProjectValue;
+import com.google.devtools.build.lib.skyframe.ProjectValue.BuildableUnit;
 import com.google.devtools.build.lib.skyframe.ProjectValue.EnforcementPolicy;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
@@ -168,6 +172,27 @@ public final class FlagSetFunction implements SkyFunction {
                 "Applying flags from the config '%s' defined in %s: %s ",
                 sclConfigNameForMessage, projectFile, optionsToApply)));
     return optionsToApply;
+  }
+
+  /**
+   * Returns all {@link BuildableUnit buildable units} that contain {@code specificTarget} in the
+   * {@code targetPatterns} field.
+   */
+  @SuppressWarnings("unused")
+  static ImmutableList<BuildableUnit> filterProjects(
+      ImmutableList<BuildableUnit> buildableUnits, Label targetToBuild) {
+    return buildableUnits.stream()
+        .filter(buildableUnit -> doesBuildableUnitMatchTarget(buildableUnit, targetToBuild))
+        .collect(toImmutableList());
+  }
+
+  /**
+   * Returns {@code true} iff the {@code specificTarget} matches the target patterns in the {@link
+   * BuildableUnit}.
+   */
+  @VisibleForTesting
+  static boolean doesBuildableUnitMatchTarget(BuildableUnit buildableUnit, Label specificTarget) {
+    return buildableUnit.targetPatternMatcher().contains(specificTarget);
   }
 
   private static ImmutableList<String> getBuildOptionsAsStrings(BuildOptions targetOptions) {
@@ -382,12 +407,19 @@ public final class FlagSetFunction implements SkyFunction {
   private static String supportedConfigsDesc(
       Label projectFile, Map<String, ProjectValue.BuildableUnit> configs) {
     String ans = "\nThis project supports:\n";
+    int longestNameLength =
+        configs.keySet().stream().map(String::length).max(Integer::compareTo).get();
     for (var configInfo : configs.entrySet()) {
-      ans += String.format("  --scl_config=%s: [", configInfo.getKey());
-      for (String flag : configInfo.getValue().flags()) {
-        ans += String.format("\"%s\"", flag);
-      }
-      ans += "]\n";
+      ans +=
+          String.format(
+              "  --scl_config=%s -> ", Strings.padEnd(configInfo.getKey(), longestNameLength, ' '));
+      String desc = configInfo.getValue().description();
+      // Add user-friendly description if specified, else list of applied flags.
+      ans +=
+          desc.isEmpty() || desc.equals(configInfo.getKey())
+              ? String.format("[%s]", String.join(" ", configInfo.getValue().flags()))
+              : desc;
+      ans += "\n";
     }
     ans += String.format("\nThis policy is defined in %s.\n", projectFile.toPathFragment());
     return ans;

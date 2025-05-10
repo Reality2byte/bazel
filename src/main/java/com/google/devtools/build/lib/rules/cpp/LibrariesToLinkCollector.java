@@ -44,7 +44,7 @@ import net.starlark.java.eval.Sequence;
 import net.starlark.java.eval.Starlark;
 
 // LINT.IfChange
-/** Class that goes over legacy linker inputs and produces {@link LibraryToLinkValue}s */
+/** Class that goes over LibrariesToLink and produces {@link LibraryToLinkValue}s */
 public class LibrariesToLinkCollector {
 
   private static final OsPathPolicy OS = OsPathPolicy.getFilePathOs();
@@ -57,9 +57,6 @@ public class LibrariesToLinkCollector {
   private final CcToolchainProvider ccToolchainProvider;
   private final Map<Artifact, Artifact> ltoMapping;
   private final PathFragment solibDir;
-
-  private final Sequence<Artifact> objectFileInputs;
-  private final Sequence<Artifact> linkstampObjectFileInputs;
   private final Sequence<LibraryToLink> librariesToLink;
   private final boolean allowLtoIndexing;
   private final FeatureConfiguration featureConfiguration;
@@ -80,8 +77,6 @@ public class LibrariesToLinkCollector {
       Map<Artifact, Artifact> ltoMapping,
       FeatureConfiguration featureConfiguration,
       boolean allowLtoIndexing,
-      Sequence<Artifact> objectFileInputs,
-      Sequence<Artifact> linkstampObjectFileInputs,
       Sequence<LibraryToLink> librariesToLink,
       boolean needWholeArchive,
       String workspaceName,
@@ -105,8 +100,6 @@ public class LibrariesToLinkCollector {
     this.ltoMapping = ltoMapping;
     this.featureConfiguration = featureConfiguration;
     this.allowLtoIndexing = allowLtoIndexing;
-    this.objectFileInputs = objectFileInputs;
-    this.linkstampObjectFileInputs = linkstampObjectFileInputs;
     this.librariesToLink = librariesToLink;
     this.needWholeArchive = needWholeArchive;
     this.output = output;
@@ -465,7 +458,7 @@ public class LibrariesToLinkCollector {
             expandedLinkerInputsBuilder);
     boolean includeSolibDir = includeSolibsPair.first;
     boolean includeToolchainLibrariesSolibDir = includeSolibsPair.second;
-    Preconditions.checkState(ltoMap.isEmpty(), "Still have LTO objects left: %s", ltoMapping);
+    Preconditions.checkState(ltoMap.isEmpty(), "Still have LTO objects left: %s", ltoMap);
 
     NestedSetBuilder<String> allRuntimeLibrarySearchDirectories = NestedSetBuilder.linkOrder();
     // rpath ordering matters for performance; first add the one where most libraries are found.
@@ -498,17 +491,7 @@ public class LibrariesToLinkCollector {
     boolean includeSolibDir = false;
     boolean includeToolchainLibrariesSolibDir = false;
     Map<String, PathFragment> linkedLibrariesPaths = new HashMap<>();
-    Set<String> staticLibraryIdentifiers = new HashSet<>();
-
-    for (Artifact input : objectFileInputs) {
-      addObjectFileInputLinkOptions(
-          input, ltoMap, librariesToLinkValues, expandedLinkerInputsBuilder);
-      expandedLinkerInputsBuilder.add(input);
-    }
-    for (Artifact input : linkstampObjectFileInputs) {
-      addObjectFileInputLinkOptions(
-          input, ltoMap, librariesToLinkValues, expandedLinkerInputsBuilder);
-    }
+    Set<Artifact> staticLibraryArtifacts = new HashSet<>();
 
     for (LibraryToLink lib : this.librariesToLink) {
       boolean staticLib =
@@ -566,7 +549,9 @@ public class LibrariesToLinkCollector {
             rpathRoots,
             rpathRootsForExplicitSoDeps);
       } else {
-        if (!staticLibraryIdentifiers.add(lib.getLibraryIdentifier())) {
+        boolean pic = lib.getEffectivePic(preferPicLibs);
+        Artifact libArtifact = pic ? lib.getPicStaticLibrary() : lib.getStaticLibrary();
+        if (!staticLibraryArtifacts.add(libArtifact)) {
           // Duplicated static libraries are linked just once and don't error out.
           // TODO(b/413333884): Clean up cc_library.src -> cc_library and error out
           continue;
@@ -774,47 +759,6 @@ public class LibrariesToLinkCollector {
           LibraryToLinkValue.forStaticLibrary(
               inputArtifact.getExecPathString(), inputIsWholeArchive));
       expandedLinkerInputsBuilder.add(libArtifact);
-    }
-  }
-
-  private void addObjectFileInputLinkOptions(
-      Artifact inputArtifact,
-      Map<Artifact, Artifact> ltoMap,
-      SequenceBuilder librariesToLinkValues,
-      NestedSetBuilder<Artifact> expandedLinkerInputsBuilder) {
-
-    boolean inputIsWholeArchive = needWholeArchive;
-
-    PathFragment sharedNonLtoObjRootPrefix =
-        featureConfiguration.isEnabled(CppRuleClasses.USE_LTO_NATIVE_OBJECT_DIRECTORY)
-            ? CppHelper.getThinLtoNativeObjectDirectoryFromLtoOutputRoot(
-                CppHelper.SHARED_NONLTO_BACKEND_ROOT_PREFIX)
-            : CppHelper.SHARED_NONLTO_BACKEND_ROOT_PREFIX;
-
-    // TODO(b/338618120): this function is used on direct object files, linkstamps and toolchain
-    // libraries; it's likely they are not mapped by lto and that the following block may be removed
-    Artifact a;
-    if ((a = ltoMap.remove(inputArtifact)) != null) {
-      if (handledByLtoIndexing(a, allowLtoIndexing, sharedNonLtoObjRootPrefix)) {
-        // The LTO artifacts that should be included in the final link
-        // are listed in the thinltoParamFile, generated by the LTO indexing.
-
-        // Even if this object file is being skipped for exposure as a build variable, it's
-        // still an input to this action.
-        expandedLinkerInputsBuilder.add(a);
-        return;
-      }
-      // No LTO indexing step, so use the LTO backend's generated artifact directly
-      // instead of the bitcode object.
-      inputArtifact = a;
-    }
-    if (inputArtifact.isTreeArtifact()) {
-      librariesToLinkValues.addValue(
-          LibraryToLinkValue.forObjectFileGroup(
-              ImmutableList.<Artifact>of(inputArtifact), inputIsWholeArchive));
-    } else {
-      librariesToLinkValues.addValue(
-          LibraryToLinkValue.forObjectFile(inputArtifact.getExecPathString(), inputIsWholeArchive));
     }
   }
 

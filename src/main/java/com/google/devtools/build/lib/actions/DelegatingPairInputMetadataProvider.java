@@ -17,7 +17,6 @@ package com.google.devtools.build.lib.actions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.skyframe.TreeArtifactValue;
-import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
 import java.util.LinkedHashSet;
@@ -54,9 +53,9 @@ public final class DelegatingPairInputMetadataProvider implements InputMetadataP
 
   @Nullable
   @Override
-  public TreeArtifactValue getTreeMetadataForPrefix(PathFragment execPath) {
-    TreeArtifactValue metadata = primary.getTreeMetadataForPrefix(execPath);
-    return metadata != null ? metadata : secondary.getTreeMetadataForPrefix(execPath);
+  public TreeArtifactValue getEnclosingTreeMetadata(PathFragment execPath) {
+    TreeArtifactValue metadata = primary.getEnclosingTreeMetadata(execPath);
+    return metadata != null ? metadata : secondary.getEnclosingTreeMetadata(execPath);
   }
 
   @Override
@@ -103,11 +102,5 @@ public final class DelegatingPairInputMetadataProvider implements InputMetadataP
   public ActionInput getInput(String execPath) {
     ActionInput input = primary.getInput(execPath);
     return input != null ? input : secondary.getInput(execPath);
-  }
-
-  @Override
-  public FileSystem getFileSystemForInputResolution() {
-    FileSystem result = primary.getFileSystemForInputResolution();
-    return result != null ? result : secondary.getFileSystemForInputResolution();
   }
 }

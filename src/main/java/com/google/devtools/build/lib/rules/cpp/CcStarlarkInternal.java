@@ -266,16 +266,6 @@ public class CcStarlarkInternal implements StarlarkValue {
         .getDefaultHdrsCheck();
   }
 
-  @StarlarkMethod(
-      name = "create_common",
-      documented = false,
-      parameters = {
-        @Param(name = "ctx", positional = false, named = true),
-      })
-  public CcCommon createCommon(StarlarkRuleContext starlarkRuleContext) {
-    return new CcCommon(starlarkRuleContext.getRuleContext());
-  }
-
   @StarlarkMethod(name = "launcher_provider", documented = false, structField = true)
   public ProviderApi getCcLauncherInfoProvider() throws EvalException {
     return CcLauncherInfo.PROVIDER;
@@ -649,8 +639,6 @@ public class CcStarlarkInternal implements StarlarkValue {
       documented = false,
       useStarlarkThread = true,
       parameters = {
-        @Param(name = "object_file_inputs"),
-        @Param(name = "linkstamp_object_file_inputs"),
         @Param(name = "libraries_to_link"),
         @Param(name = "cc_toolchain"),
         @Param(name = "feature_configuration"),
@@ -667,8 +655,6 @@ public class CcStarlarkInternal implements StarlarkValue {
         @Param(name = "workspace_name"),
       })
   public StructImpl collectLibrariesToLink(
-      Sequence<?> objectFileInputs,
-      Sequence<?> linkstampObjectFileInputs,
       Sequence<?> librariesToLink,
       StarlarkInfo ccToolchain,
       FeatureConfigurationForStarlark featureConfiguration,
@@ -697,9 +683,6 @@ public class CcStarlarkInternal implements StarlarkValue {
             Dict.cast(ltoMapping, Artifact.class, Artifact.class, "lto_mapping"),
             featureConfiguration.getFeatureConfiguration(),
             allowLtoIndexing,
-            Sequence.cast(objectFileInputs, Artifact.class, "object_file_inputs"),
-            Sequence.cast(
-                linkstampObjectFileInputs, Artifact.class, "linkstamp_object_file_inputs"),
             Sequence.cast(librariesToLink, LibraryToLink.class, "librariesToLink"),
             needWholeArchive,
             workspaceName,

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -57,6 +57,7 @@ EOF
   add_rules_java "MODULE.bazel"
   add_rules_python "MODULE.bazel"
   add_rules_shell "MODULE.bazel"
+  add_rules_cc "MODULE.bazel"
 }
 
 #

@@ -48,6 +48,7 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
       ConfiguredTargetAndData prerequisite,
       Attribute attribute) {
     validateDirectPrerequisiteLocation(contextBuilder, prerequisite);
+    checkForMisplacedPackageGroups(contextBuilder, prerequisite, attribute);
     validateDirectPrerequisiteVisibility(contextBuilder, prerequisite, attribute);
     validateDirectPrerequisiteForTestOnly(contextBuilder, prerequisite);
     validateDirectPrerequisiteForDeprecation(
@@ -60,14 +61,8 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
    * javatests directory may also depend on its corresponding java package without a warning.
    */
   // TODO: #19922 - Rename this method to not imply that it is symmetric across its arguments.
-  public abstract boolean isSameLogicalPackage(
+  protected abstract boolean isSameLogicalPackage(
       PackageIdentifier thisPackage, PackageIdentifier prerequisitePackage);
-
-  /**
-   * Returns whether a package is considered experimental. Packages outside of experimental may not
-   * depend on packages that are experimental.
-   */
-  protected abstract boolean packageUnderExperimental(PackageIdentifier packageIdentifier);
 
   protected abstract boolean checkVisibilityForExperimental(RuleContext.Builder context);
 
@@ -81,7 +76,9 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
     String attrName = attribute.getName();
     Rule rule = context.getRule();
 
-    checkForMisplacedPackageGroups(context, prerequisite, attribute, attrName, rule);
+    if (!context.getConfiguration().checkVisibility()) {
+      return;
+    }
 
     // We don't check the visibility of late-bound attributes, because it would break some
     // features.
@@ -106,6 +103,8 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
       }
     }
 
+    boolean checkExperimental = checkVisibilityForExperimental(context);
+
     // Normally visibility is validated with respect to the location of the consuming target. But
     // implicit attributes of Starlark-defined rules and aspects get validated primarily with
     // respect to the .bzl where the rule or aspect is exported, with the location of the target
@@ -123,8 +122,8 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
 
     if (!validateWithRespectToAttributeDefinition) {
       // Normal case: The attribute must be visible from the target.
-      if (!isVisibleToDeclaration(prerequisite, rule)) {
-        handleVisibilityConflict(context, prerequisite, rule.getLabel());
+      if (!isVisibleToDeclaration(prerequisite, rule, checkExperimental)) {
+        reportVisibilityConflict(context, prerequisite, rule.getLabel());
       }
     } else {
       // Determine the label of the .bzl where the rule or (main) aspect was exported.
@@ -139,13 +138,14 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
             checkNotNull(rule.getRuleClassObject().getRuleDefinitionEnvironmentLabel());
       }
       // Validate with respect to the defining .bzl.
-      if (!isVisibleToLocation(prerequisite, implicitDefinition.getPackageIdentifier())) {
+      if (!isVisibleToLocation(
+          prerequisite, implicitDefinition.getPackageIdentifier(), checkExperimental)) {
         // Failed. Validate with respect to the target anyway, for backwards compatibility.
         // TODO(bazel-team): When can this fallback be removed?
-        if (!isVisibleToDeclaration(prerequisite, rule)) {
+        if (!isVisibleToDeclaration(prerequisite, rule, checkExperimental)) {
           // True failure. In the error message, always suggest making the prerequisite visible from
           // the definition, not the target.
-          handleVisibilityConflict(context, prerequisite, implicitDefinition);
+          reportVisibilityConflict(context, prerequisite, implicitDefinition);
         }
       }
     }
@@ -171,7 +171,9 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
   // TODO: #19922 - Consider replacing use of Object with a new interface abstracting Rule and
   // MacroInstance.
   private boolean isVisibleToDeclaration(
-      ConfiguredTargetAndData prerequisite, Object consumingDeclaration) {
+      ConfiguredTargetAndData prerequisite,
+      Object consumingDeclaration,
+      boolean checkExperimental) {
     PackageIdentifier consumingDeclarationPkg;
     @Nullable MacroInstance declaringMacro;
     if (consumingDeclaration instanceof Rule target) {
@@ -195,22 +197,22 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
       declaringMacro.visitExplicitAttributeLabels(
           label -> declaringMacroWasGivenPrereqByCaller[0] |= label.equals(prereqLabel));
       if (declaringMacroWasGivenPrereqByCaller[0]) {
-        return isVisibleToDeclaration(prerequisite, declaringMacro);
+        return isVisibleToDeclaration(prerequisite, declaringMacro, checkExperimental);
       }
     }
 
     if (declaringMacro != null) {
       if (declaringMacro.getMacroClass().isFinalizer()
-          && isVisibleToLocation(prerequisite, consumingDeclarationPkg)) {
+          && isVisibleToLocation(prerequisite, consumingDeclarationPkg, checkExperimental)) {
         // Finalizers, unlike ordinary symbolic macros, are also granted the same visibility
         // privileges as the consuming package's BUILD file.
         return true;
       }
       PackageIdentifier macroLocation =
           declaringMacro.getMacroClass().getDefiningBzlLabel().getPackageIdentifier();
-      return isVisibleToLocation(prerequisite, macroLocation);
+      return isVisibleToLocation(prerequisite, macroLocation, checkExperimental);
     } else {
-      return isVisibleToLocation(prerequisite, consumingDeclarationPkg);
+      return isVisibleToLocation(prerequisite, consumingDeclarationPkg, checkExperimental);
     }
   }
 
@@ -219,7 +221,11 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
    * prerequisite}'s visibility provider and the same-logical-package condition.
    */
   private boolean isVisibleToLocation(
-      ConfiguredTargetAndData prerequisite, PackageIdentifier location) {
+      ConfiguredTargetAndData prerequisite, PackageIdentifier location, boolean checkExperimental) {
+    if (packageUnderExperimental(location) && !checkExperimental) {
+      return true;
+    }
+
     VisibilityProvider visibility =
         prerequisite.getConfiguredTarget().getProvider(VisibilityProvider.class);
 
@@ -263,11 +269,10 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
    * it is not allowed.
    */
   private void checkForMisplacedPackageGroups(
-      RuleContext.Builder context,
-      ConfiguredTargetAndData prerequisite,
-      Attribute attribute,
-      String attrName,
-      Rule rule) {
+      RuleContext.Builder context, ConfiguredTargetAndData prerequisite, Attribute attribute) {
+    String attrName = attribute.getName();
+    Rule rule = context.getRule();
+
     // TODO(bazel-team): The instanceof check seems pretty suspect, and should maybe be phrased in
     // terms of a provider check that would work with the `alias` rule. Then again, the string
     // matching on PackageSpecification[Provider|Info] is probably more suspect.
@@ -300,16 +305,8 @@ public abstract class CommonPrerequisiteValidator implements PrerequisiteValidat
     }
   }
 
-  private void handleVisibilityConflict(
+  private void reportVisibilityConflict(
       RuleContext.Builder context, ConfiguredTargetAndData prerequisite, Label rule) {
-    if (!context.getConfiguration().checkVisibility()) {
-      return;
-    }
-    if (packageUnderExperimental(rule.getPackageIdentifier())
-        && !checkVisibilityForExperimental(context)) {
-      return;
-    }
-
     // Visibility error:
     //   target '//land:land' is not visible from
     //   target '//red_delicious:apple'

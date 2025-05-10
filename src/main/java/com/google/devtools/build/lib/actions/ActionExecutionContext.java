@@ -172,8 +172,8 @@ public class ActionExecutionContext implements Closeable, ActionContext.ActionCo
 
     @Nullable
     @Override
-    public TreeArtifactValue getTreeMetadataForPrefix(PathFragment execPath) {
-      return wrapped.getTreeMetadataForPrefix(execPath);
+    public TreeArtifactValue getEnclosingTreeMetadata(PathFragment execPath) {
+      return wrapped.getEnclosingTreeMetadata(execPath);
     }
 
     @Nullable
@@ -208,12 +208,6 @@ public class ActionExecutionContext implements Closeable, ActionContext.ActionCo
     public ImmutableList<RunfilesTree> getRunfilesTrees() {
       return ImmutableList.of(overriddenTree);
     }
-
-    @Override
-    public FileSystem getFileSystemForInputResolution() {
-      return wrapped.getFileSystemForInputResolution();
-    }
-
   }
 
   /** Enum for --subcommands flag */
